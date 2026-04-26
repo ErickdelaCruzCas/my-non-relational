@@ -156,7 +156,7 @@ Si ves `strategy=full_scan` en un `find score>50`, hay un bug en la selección d
 
 ---
 
-## Archivos relevantes
+## Archivos relevantes — Phase 5a
 
 | Archivo | Qué contiene |
 |---|---|
@@ -164,3 +164,99 @@ Si ves `strategy=full_scan` en un `find score>50`, hay un bug en la selección d
 | `engine/query.go` | `ExecuteFind`, selección `range_bst`, `matchesAll` con ops de rango |
 | `api/db.go` | `rangeIdx` en el struct DB; mantenimiento en Insert/Update/Delete |
 | `tests/phase5a_test.go` | Suite automática (cubre los mismos casos que este documento) |
+
+---
+
+---
+
+## Phase 5a.5 — AVL Tree como índice de rangos
+
+El BST naïve de Phase 5a degenera en lista enlazada cuando los datos se insertan en orden: altura ≈ N, O(N) por búsqueda. El AVL Tree mantiene la invariante `|h(left) - h(right)| ≤ 1` mediante 4 casos de rotación (LL, RR, LR, RL), garantizando altura ≤ 1.44·log₂(N) en todo momento.
+
+A partir de Phase 5a.5, el DB usa `RangeAVLIndex` (`engine/range_avl.go`) en lugar de `RangeIndex`. La interfaz pública es idéntica — el REPL no cambia.
+
+---
+
+## AT-09 — Rotaciones AVL visibles en los logs
+
+```bash
+go run ./cmd/seed -count 50 -fresh
+```
+
+**Qué verificar en los logs del seed:**
+- Aparecen líneas con `[avl] rotation type=RR` (y/o `LL`, `LR`, `RL`).
+- Esto confirma que el AVL está rebalanceando en cada insert.
+- El BST naïve no emite estas líneas (no rota nunca).
+
+El número de rotaciones depende del orden de inserción. Con IDs aleatorios el árbol crece casi balanceado — pocas rotaciones. Con claves ordenadas (ver AT-10) se disparan.
+
+---
+
+## AT-10 — Contraste de alturas BST vs AVL (test automático)
+
+Este es el test educativo central de Phase 5a.5. Ejecuta:
+
+```bash
+go test ./tests/ -run TestAVLBalanceVsBST -v
+```
+
+**Output esperado:**
+
+```
+=== RUN   TestAVLBalanceVsBST
+    phase5a5_test.go:XXX: N=200 sorted inserts
+    phase5a5_test.go:XXX: BST height = 200  (expected ≈ 200, O(N) degenerate linked list)
+    phase5a5_test.go:XXX: AVL height = 11   (expected ≤ 15,  O(log N) balanced — 1.44·log₂(200) ≈ 10.8)
+--- PASS: TestAVLBalanceVsBST
+```
+
+**Qué significa:**
+- BST: 200 inserts en orden ascendente → el árbol se convierte en una lista enlazada de profundidad 200. Cada búsqueda recorre todos los nodos: O(N).
+- AVL: mismos 200 inserts → el árbol se rebalancea continuamente → profundidad ≈ 11. Cada búsqueda recorre 11 nodos: O(log N).
+- Ambos devuelven **exactamente los mismos resultados** para `between [50, 100]` — el AVL es más rápido pero no cambia la semántica.
+
+---
+
+## AT-11 — REPL con AVL (mismos comandos que Phase 5a)
+
+El REPL no cambia — el AVL opera de forma transparente.
+
+```bash
+go run ./cmd/seed -count 50 -fresh
+go run ./cmd/repl.go
+```
+
+```
+> find score>50
+> find score>=80 sort score desc limit 5
+> find age<30 sort age asc
+```
+
+**Qué verificar:**
+- Los resultados son idénticos a Phase 5a.
+- Los logs siguen mostrando `strategy=range_bst` (el nombre de la estrategia no cambia — el cambio es interno).
+- Con `-v` en los tests se ven las alturas y las rotaciones.
+
+---
+
+## El arco completo: BST → AVL → Skip List
+
+| Estructura | Complejidad | Invariante | Rotaciones |
+|---|---|---|---|
+| BST naïve (5a) | O(N) peor caso | Ninguna | 0 |
+| AVL Tree (5a.5) | O(log N) garantizado | `|h(L)-h(R)| ≤ 1` | 4 casos |
+| Skip List (5b) | O(log N) probabilístico | Niveles aleatorios | 0 |
+
+La pregunta que responde Phase 5b: *¿podemos tener O(log N) garantizado* (probabilístico) *sin las 4 rotaciones del AVL?* La respuesta es la Skip List.
+
+---
+
+## Archivos relevantes — Phase 5a.5
+
+| Archivo | Qué contiene |
+|---|---|
+| `engine/avl.go` | `AVLTree`, rotaciones LL/RR/LR/RL, `Range`, `GreaterThan`, `LessThan` |
+| `engine/range_avl.go` | `RangeAVLIndex` — mismo interfaz que `RangeIndex` pero usa AVL |
+| `engine/bst.go` | `RangeIndex.MaxTreeHeight` — para el test de contraste |
+| `api/db.go` | `rangeIdx *engine.RangeAVLIndex` — swap del tipo (Phase 5a.5) |
+| `tests/phase5a5_test.go` | Suite automática + `TestAVLBalanceVsBST` |
