@@ -162,17 +162,14 @@ func cmdFind(db *api.DB, rest string) {
 			}
 			req.Limit = n
 		default:
-			// Expect field=value. Only the first "=" is the separator.
-			idx := strings.IndexByte(tok, '=')
-			if idx <= 0 {
-				views.Error(fmt.Errorf("usage: find [<campo>=<valor>] [sort <campo>] [asc|desc] [limit <N>]"))
+			// Parse field<op>value.
+			// Check multi-char ops first (>= before >, <= before <).
+			f, err := parseFilterToken(tok)
+			if err != nil {
+				views.Error(fmt.Errorf("usage: find [<campo><op><valor>] [sort <campo>] [asc|desc] [limit <N>]"))
 				return
 			}
-			req.Filters = append(req.Filters, engine.Filter{
-				Field: tok[:idx],
-				Op:    "eq",
-				Value: tok[idx+1:],
-			})
+			req.Filters = append(req.Filters, f)
 		}
 		i++
 	}
@@ -183,6 +180,49 @@ func cmdFind(db *api.DB, rest string) {
 		return
 	}
 	views.DocList(docs)
+}
+
+// parseFilterToken parses a token like "score>50", "age>=18", "name=alice".
+// Operator detection order: >= before >, <= before < (to avoid prefix collision).
+// Numeric values (float64) are used as-is for range ops.
+// String values are kept as strings for eq.
+func parseFilterToken(tok string) (engine.Filter, error) {
+	type opSpec struct {
+		sym string
+		op  string
+	}
+	ops := []opSpec{
+		{">=", "gte"},
+		{"<=", "lte"},
+		{">", "gt"},
+		{"<", "lt"},
+		{"=", "eq"},
+	}
+	for _, spec := range ops {
+		idx := strings.Index(tok, spec.sym)
+		if idx <= 0 {
+			continue
+		}
+		field := tok[:idx]
+		raw := tok[idx+len(spec.sym):]
+		if field == "" || raw == "" {
+			continue
+		}
+		var value any
+		if spec.op == "eq" {
+			// Equality: keep as string so non-numeric fields work too.
+			value = raw
+		} else {
+			// Range op: value must be numeric.
+			f, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return engine.Filter{}, fmt.Errorf("range value must be numeric, got %q", raw)
+			}
+			value = f
+		}
+		return engine.Filter{Field: field, Op: spec.op, Value: value}, nil
+	}
+	return engine.Filter{}, fmt.Errorf("no operator found in token %q", tok)
 }
 
 func cmdDelete(db *api.DB, id string) {

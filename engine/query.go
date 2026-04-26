@@ -22,10 +22,18 @@ import (
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 // Filter represents a single predicate field op value.
-// Op is "eq" in Phase 4; "gt","lt","gte","lte","between" arrive in Phase 5.
+//
+// Supported Ops:
+//
+//	"eq"      — equality (Phase 4, secondary index)
+//	"gt"      — greater than (Phase 5a, BST)
+//	"gte"     — greater than or equal
+//	"lt"      — less than
+//	"lte"     — less than or equal
+//	"between" — Value must be [2]float64{lo, hi}, inclusive on both ends
 type Filter struct {
 	Field string
-	Op    string // "eq"
+	Op    string
 	Value any
 }
 
@@ -42,24 +50,49 @@ type FindRequest struct {
 
 // ExecuteFind runs the query pipeline on a disk-backed collection.
 // entries is the full sorted primary index. secondary is used for single-eq
-// optimization. file is the WAL *os.File. ser is the active serializer.
-func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, file *os.File, ser Serializer, req FindRequest) ([]map[string]any, error) {
+// optimization. rangeIdx is used for single range-op optimization (Phase 5a).
+// file is the WAL *os.File. ser is the active serializer.
+func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *RangeIndex, file *os.File, ser Serializer, req FindRequest) ([]map[string]any, error) {
 	// ── 1. Strategy: pick candidate offsets ──────────────────────────────────
 	var candidates []map[string]any
 	strategy := "full_scan"
 
-	if len(req.Filters) == 1 && req.Filters[0].Op == "eq" {
+	if len(req.Filters) == 1 {
 		f := req.Filters[0]
-		offsets := secondary.Lookup(f.Field, fmt.Sprintf("%v", f.Value))
-		strategy = "secondary"
-		LogInfo("[query] strategy", "type", strategy, "field", f.Field, "value", f.Value, "candidates", len(offsets))
-		for _, off := range offsets {
-			doc, err := ReadDocAt(file, off, ser)
-			if err != nil {
-				LogInfo("[query] read_error", "offset", off, "err", err)
-				continue
+		if f.Op == "eq" {
+			offsets := secondary.Lookup(f.Field, fmt.Sprintf("%v", f.Value))
+			strategy = "secondary"
+			LogInfo("[query] strategy", "type", strategy, "field", f.Field, "value", f.Value, "candidates", len(offsets))
+			for _, off := range offsets {
+				doc, err := ReadDocAt(file, off, ser)
+				if err != nil {
+					LogInfo("[query] read_error", "offset", off, "err", err)
+					continue
+				}
+				candidates = append(candidates, doc)
 			}
-			candidates = append(candidates, doc)
+		} else if isRangeOp(f.Op) {
+			offsets := rangeIdx.Query(f.Field, f.Op, f.Value)
+			strategy = "range_bst"
+			LogInfo("[query] strategy", "type", strategy, "field", f.Field, "op", f.Op, "value", f.Value, "candidates", len(offsets))
+			for _, off := range offsets {
+				doc, err := ReadDocAt(file, off, ser)
+				if err != nil {
+					LogInfo("[query] read_error", "offset", off, "err", err)
+					continue
+				}
+				candidates = append(candidates, doc)
+			}
+		} else {
+			LogInfo("[query] strategy", "type", strategy, "total_docs", len(entries))
+			for _, e := range entries {
+				doc, err := ReadDocAt(file, e.Offset, ser)
+				if err != nil {
+					LogInfo("[query] read_error", "id", e.ID, "err", err)
+					continue
+				}
+				candidates = append(candidates, doc)
+			}
 		}
 	} else {
 		LogInfo("[query] strategy", "type", strategy, "total_docs", len(entries))
@@ -204,9 +237,40 @@ func matchesAll(doc map[string]any, filters []Filter) bool {
 			if fmt.Sprintf("%v", val) != fmt.Sprintf("%v", f.Value) {
 				return false
 			}
+		case "gt":
+			if !(toFloat(val) > toFloat(f.Value)) {
+				return false
+			}
+		case "gte":
+			if !(toFloat(val) >= toFloat(f.Value)) {
+				return false
+			}
+		case "lt":
+			if !(toFloat(val) < toFloat(f.Value)) {
+				return false
+			}
+		case "lte":
+			if !(toFloat(val) <= toFloat(f.Value)) {
+				return false
+			}
+		case "between":
+			bounds := f.Value.([2]float64)
+			v := toFloat(val)
+			if !(v >= bounds[0] && v <= bounds[1]) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// isRangeOp reports whether op is a range predicate (Phase 5a).
+func isRangeOp(op string) bool {
+	switch op {
+	case "gt", "gte", "lt", "lte", "between":
+		return true
+	}
+	return false
 }
 
 // ── Projection helper ─────────────────────────────────────────────────────────

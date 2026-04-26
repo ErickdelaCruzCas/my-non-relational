@@ -37,6 +37,7 @@ type DB struct {
 	store     *engine.HashMap        // in-memory mode only (path == "")
 	index     *engine.PrimaryIndex   // disk mode: id → WAL offset
 	secondary *engine.SecondaryIndex // disk mode: "field:value" → []offset
+	rangeIdx  *engine.RangeIndex     // disk mode: numeric field → BST of (value, offset)
 	wal       *engine.WAL            // nil in in-memory mode
 	ser       engine.Serializer      // swapped to MsgPackSerializer in Phase 7
 	counter   atomic.Int64           // monotonic ID counter; must not be copied
@@ -73,6 +74,7 @@ func Open(path string) (*DB, error) {
 
 	db.index = engine.NewPrimaryIndex(1024)
 	db.secondary = engine.NewSecondaryIndex()
+	db.rangeIdx = engine.NewRangeIndex()
 
 	// ── Try fast path: load index.json ───────────────────────────────────────
 	start := time.Now()
@@ -88,6 +90,7 @@ func Open(path string) (*DB, error) {
 			engine.LogInfo("[startup] spot-check failed, rebuilding", "reason", err2)
 			db.index = engine.NewPrimaryIndex(1024)
 			db.secondary = engine.NewSecondaryIndex()
+			db.rangeIdx = engine.NewRangeIndex()
 		}
 	} else {
 		engine.LogInfo("[startup] index.json missing or corrupt, rebuilding", "reason", err)
@@ -155,6 +158,7 @@ func (db *DB) Insert(doc map[string]any) (string, error) {
 
 	db.index.Add(id, offset)
 	db.secondary.AddDoc(stored, offset)
+	db.rangeIdx.AddDoc(stored, offset)
 	if err := db.saveIndex(filepath.Join(db.path, "index.json")); err != nil {
 		engine.LogInfo("[db] save_index_error", "op", "insert", "err", err)
 	}
@@ -237,8 +241,10 @@ func (db *DB) Update(id string, partial map[string]any) error {
 	}
 
 	db.secondary.RemoveDoc(oldDoc, oldOffset)
+	db.rangeIdx.RemoveDoc(oldDoc, oldOffset)
 	db.index.Add(id, newOffset)
 	db.secondary.AddDoc(merged, newOffset)
+	db.rangeIdx.AddDoc(merged, newOffset)
 	if err := db.saveIndex(filepath.Join(db.path, "index.json")); err != nil {
 		engine.LogInfo("[db] save_index_error", "op", "update", "err", err)
 	}
@@ -279,6 +285,7 @@ func (db *DB) Delete(id string) error {
 
 	db.index.Remove(id)
 	db.secondary.RemoveDoc(oldDoc, offset)
+	db.rangeIdx.RemoveDoc(oldDoc, offset)
 	if err := db.saveIndex(filepath.Join(db.path, "index.json")); err != nil {
 		engine.LogInfo("[db] save_index_error", "op", "delete", "err", err)
 	}
@@ -311,7 +318,7 @@ func (db *DB) Find(req engine.FindRequest) ([]map[string]any, error) {
 	}
 
 	// ── Disk mode ─────────────────────────────────────────────────────────────
-	return engine.ExecuteFind(db.index.Entries(), db.secondary, db.wal.File(), db.ser, req)
+	return engine.ExecuteFind(db.index.Entries(), db.secondary, db.rangeIdx, db.wal.File(), db.ser, req)
 }
 
 // Close saves the index and closes the WAL.
@@ -330,8 +337,9 @@ func (db *DB) Close() error {
 
 // indexFile is the JSON structure for data/index.json.
 type indexFile struct {
-	Primary   [][2]any           `json:"primary"`   // [[id, offset], ...]
-	Secondary map[string][]int64 `json:"secondary"` // "field:value" → [offsets]
+	Primary   [][2]any            `json:"primary"`   // [[id, offset], ...]
+	Secondary map[string][]int64  `json:"secondary"` // "field:value" → [offsets]
+	Range     map[string][][2]any `json:"range"`     // field → [[key, [offsets...]], ...]
 }
 
 func (db *DB) saveIndex(path string) error {
@@ -343,6 +351,7 @@ func (db *DB) saveIndex(path string) error {
 	data, err := json.Marshal(indexFile{
 		Primary:   primary,
 		Secondary: db.secondary.All(),
+		Range:     db.rangeIdx.All(),
 	})
 	if err != nil {
 		return err
@@ -370,6 +379,29 @@ func (db *DB) loadIndex(path string) error {
 	for key, offsets := range f.Secondary {
 		for _, off := range offsets {
 			db.secondary.All()[key] = append(db.secondary.All()[key], off)
+		}
+	}
+	// Rebuild range index from the serialized BST entries.
+	// Each entry is [key float64, offsets []float64] (JSON decodes numbers as float64).
+	for field, entries := range f.Range {
+		for _, entry := range entries {
+			if len(entry) != 2 {
+				continue
+			}
+			keyF, ok := entry[0].(float64)
+			if !ok {
+				continue
+			}
+			// offsets are encoded as []any of float64 by encoding/json.
+			rawOffsets, ok := entry[1].([]any)
+			if !ok {
+				continue
+			}
+			for _, raw := range rawOffsets {
+				if offF, ok := raw.(float64); ok {
+					db.rangeIdx.LoadEntry(field, keyF, int64(offF))
+				}
+			}
 		}
 	}
 	return nil
@@ -422,6 +454,7 @@ func (db *DB) rebuildFromWAL(walPath string) error {
 	for id, doc := range docs {
 		offset := result.LiveOffsets[id]
 		db.secondary.AddDoc(doc, offset)
+		db.rangeIdx.AddDoc(doc, offset)
 	}
 	engine.LogInfo("[startup] wal_rebuild",
 		"replayed", result.EntriesReplayed,
