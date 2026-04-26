@@ -294,6 +294,28 @@ func (r *RangeIndex) LoadEntry(field string, key float64, offset int64) {
 	r.treeFor(field).Insert(key, offset)
 }
 
+// MaxTreeHeight returns the height of the BST for the given field.
+// Used by the BST vs AVL contrast test (TestAVLBalanceVsBST).
+// On sorted inserts, height ≈ N — the degenerate linked-list case.
+func (r *RangeIndex) MaxTreeHeight(field string) int {
+	if t, ok := r.trees[field]; ok {
+		return bstHeight(t.root)
+	}
+	return 0
+}
+
+// bstHeight returns the height of the subtree rooted at n. O(N) traversal.
+func bstHeight(n *bstNode) int {
+	if n == nil {
+		return 0
+	}
+	l, r := bstHeight(n.left), bstHeight(n.right)
+	if l > r {
+		return l + 1
+	}
+	return r + 1
+}
+
 // treeFor returns the BST for field, creating it if it does not exist.
 func (r *RangeIndex) treeFor(field string) *BST {
 	if t, ok := r.trees[field]; ok {

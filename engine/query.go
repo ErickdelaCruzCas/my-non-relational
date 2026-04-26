@@ -52,7 +52,7 @@ type FindRequest struct {
 // entries is the full sorted primary index. secondary is used for single-eq
 // optimization. rangeIdx is used for single range-op optimization (Phase 5a).
 // file is the WAL *os.File. ser is the active serializer.
-func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *RangeIndex, file *os.File, ser Serializer, req FindRequest) ([]map[string]any, error) {
+func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *RangeAVLIndex, file *os.File, ser Serializer, req FindRequest) ([]map[string]any, error) {
 	// ── 1. Strategy: pick candidate offsets ──────────────────────────────────
 	var candidates []map[string]any
 	strategy := "full_scan"

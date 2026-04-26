@@ -37,7 +37,7 @@ type DB struct {
 	store     *engine.HashMap        // in-memory mode only (path == "")
 	index     *engine.PrimaryIndex   // disk mode: id → WAL offset
 	secondary *engine.SecondaryIndex // disk mode: "field:value" → []offset
-	rangeIdx  *engine.RangeIndex     // disk mode: numeric field → BST of (value, offset)
+	rangeIdx  *engine.RangeAVLIndex  // disk mode: numeric field → AVL tree of (value, offset)
 	wal       *engine.WAL            // nil in in-memory mode
 	ser       engine.Serializer      // swapped to MsgPackSerializer in Phase 7
 	counter   atomic.Int64           // monotonic ID counter; must not be copied
@@ -74,7 +74,7 @@ func Open(path string) (*DB, error) {
 
 	db.index = engine.NewPrimaryIndex(1024)
 	db.secondary = engine.NewSecondaryIndex()
-	db.rangeIdx = engine.NewRangeIndex()
+	db.rangeIdx = engine.NewRangeAVLIndex()
 
 	// ── Try fast path: load index.json ───────────────────────────────────────
 	start := time.Now()
@@ -90,7 +90,7 @@ func Open(path string) (*DB, error) {
 			engine.LogInfo("[startup] spot-check failed, rebuilding", "reason", err2)
 			db.index = engine.NewPrimaryIndex(1024)
 			db.secondary = engine.NewSecondaryIndex()
-			db.rangeIdx = engine.NewRangeIndex()
+			db.rangeIdx = engine.NewRangeAVLIndex()
 		}
 	} else {
 		engine.LogInfo("[startup] index.json missing or corrupt, rebuilding", "reason", err)
