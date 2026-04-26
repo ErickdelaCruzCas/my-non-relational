@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Fill DB" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="my-non-relational" />
+    <working_directory value="$PROJECT_DIR$" />
+    <kind value="PACKAGE" />
+    <package value="my-non-relational/cmd/seed" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/../my-non-relational|$PROJECT_DIR$/cmd/repl.go" />
+    <method v="2" />
+  </configuration>
+</component>

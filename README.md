@@ -405,6 +405,14 @@ En startup: cargar `index.json`, verificar integridad spot-checking contra el WA
 
 ## Fase 4 — Motor de consultas + Min-Heap TopK
 
+> **Punto de extracción de `db.go`** — Al terminar esta fase, `db.go` acumula:
+> CRUD, WAL writes, locking, generación de IDs, merge logic, y ahora el motor
+> de queries. En un sistema real este sería el momento de extraer tipos separados:
+> `QueryEngine`, `IndexManager`, `StorageManager`. En este proyecto continuamos
+> con un único coordinador de forma deliberada — la acumulación progresiva es
+> parte de la lección. Si en fases posteriores el archivo supera las 400 líneas,
+> es una señal para iniciar la extracción.
+
 ### Objetivo
 Implementar `Find(query)` con filtros de igualdad, sort, limit y projection. Cuando hay `limit` activo, usar un **min-heap** para TopK en lugar de sort total. Full scan del WAL como estrategia base (sin índice secundario todavía).
 

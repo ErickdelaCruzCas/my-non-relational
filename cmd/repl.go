@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"my-non-relational/api"
-	"my-non-relational/cmd/views"
 	"my-non-relational/engine"
+	"my-non-relational/internal/views"
 )
 
 func main() {
@@ -22,7 +22,7 @@ func main() {
 	}
 	defer db.Close()
 
-	views.Banner("Phase 1 (in-memory)")
+	views.Banner("Phase 2 (persistent)")
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -62,6 +62,8 @@ func handleCommand(db *api.DB, line string) {
 		cmdUpdate(db, rest)
 	case "delete":
 		cmdDelete(db, rest)
+	case "find":
+		cmdFind(db, rest)
 	case "help":
 		views.Help()
 	case "exit":
@@ -117,6 +119,26 @@ func cmdUpdate(db *api.DB, rest string) {
 		return
 	}
 	views.Success("updated  " + id)
+}
+
+func cmdFind(db *api.DB, rest string) {
+	filter := map[string]string{}
+	if rest != "" {
+		// Parse "campo=valor". Only the first "=" is the separator so values
+		// containing "=" are handled correctly.
+		idx := strings.IndexByte(rest, '=')
+		if idx <= 0 {
+			views.Error(fmt.Errorf("usage: find  or  find <campo>=<valor>"))
+			return
+		}
+		filter[rest[:idx]] = rest[idx+1:]
+	}
+	docs, err := db.Find(filter)
+	if err != nil {
+		views.Error(err)
+		return
+	}
+	views.IDList(docs)
 }
 
 func cmdDelete(db *api.DB, id string) {

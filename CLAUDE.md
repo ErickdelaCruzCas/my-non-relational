@@ -10,7 +10,7 @@ Detalle completo en README.md.
 - **Append-only log** como única forma de escribir. Sin overwrites.
 - **CRC32 por registro WAL** (Fase 2): recovery rechaza registros con checksum inválido.
 - **Documentos JSON** (`map[string]any` con `_id` reservado). Sin esquema fijo.
-- **Serialización**: JSON primero (fases 1-6), migración a MsgPack en Fase 7.
+- **Serialización**: JSON primero (fases 1-6), migración a MsgPack en Fase 7. La interfaz `engine.Serializer` (introducida en Fase 2) aísla el formato — en Fase 7 basta con pasar `MsgPackSerializer{}` a `Open()` sin tocar `db.go` ni `recovery.go`.
 - **Índice primario**: sorted slice de `(id, offset)` con binary search + Bloom Filter previo — no hash map.
 - **Índice secundario**: hash map `field:value -> []offset`, persistido en `data/index.json`.
 - **Sort con limit**: min-heap de tamaño K (TopK) en lugar de sort total cuando hay `limit`.
@@ -78,6 +78,13 @@ tests/    phaseN_test.go
 
 ---
 
+## Decisiones de arquitectura evolutiva
+
+- **`db.go` como coordinador único** (deliberado hasta Fase 4): acumula CRUD, WAL, locking, query engine. Es parte de la lección ver cómo crece. Si supera 400 líneas, iniciar extracción de `QueryEngine` e `IndexManager`.
+- **Punto de extracción marcado en README**: el bloque `> Punto de extracción de db.go` en la descripción de Fase 4 indica cuándo empezar a partir el archivo.
+
+---
+
 ## Fase actual
 
-**Fase 2** — pendiente de inicio. Fase 1 completada (incluyendo Fase 1b: Robin Hood Hashing).
+**Fase 2** — completada. Fase 3 pendiente de inicio.

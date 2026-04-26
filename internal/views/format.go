@@ -90,6 +90,25 @@ func Help() {
 	}
 }
 
+// IDList prints a list of document IDs extracted from docs, followed by a
+// count line. If docs is empty it prints a "no results" message instead.
+func IDList(docs []map[string]any) {
+	if len(docs) == 0 {
+		fmt.Println(color(cyan, "(no results)"))
+		return
+	}
+	for _, doc := range docs {
+		if id, ok := doc["_id"].(string); ok {
+			fmt.Println(color(cyan, id))
+		}
+	}
+	noun := "documentos"
+	if len(docs) == 1 {
+		noun = "documento"
+	}
+	fmt.Printf("(%d %s)\n", len(docs), noun)
+}
+
 // Banner prints the startup header.
 func Banner(phase string) {
 	fmt.Println(color(bold, "my-non-relational") + " — " + phase)

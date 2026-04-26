@@ -73,6 +73,37 @@ func hashKey(key string) uint64 {
 	return h.Sum64()
 }
 
+// fnv1a64 is a hand-rolled FNV-1a 64-bit hash — kept here as a reference
+// implementation so the algorithm is visible without diving into the stdlib.
+// Not used in production; hashKey() above delegates to hash/fnv.
+//
+// FNV-1a algorithm:
+//
+//	hash = offset_basis
+//	for each byte b:
+//	    hash = hash XOR b
+//	    hash = hash × fnv_prime
+//
+// The XOR-then-multiply order (vs FNV-1's multiply-then-XOR) gives better
+// avalanche for short keys — a small change in the input flips many output bits.
+//
+// Constants are defined by the FNV spec (https://www.isthe.com/chongo/tech/comp/fnv/):
+//
+//	offset basis = 14695981039346656037
+//	prime        = 1099511628211
+func fnv1a64(key string) uint64 { //nolint:unused
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	h := offset
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= prime
+	}
+	return h
+}
+
 // idealSlot returns the bucket index where key would live with zero displacement.
 func (m *HashMap) idealSlot(key string) int {
 	return int(hashKey(key) % uint64(m.capacity))
@@ -199,6 +230,19 @@ func (m *HashMap) Count() int {
 // Capacity returns the current allocated slot count. Exposed for white-box tests.
 func (m *HashMap) Capacity() int {
 	return m.capacity
+}
+
+// All returns a slice of all live documents in undefined order.
+// The returned slice contains the internal values directly — callers that
+// need to mutate entries must copy them first.
+func (m *HashMap) All() []map[string]any {
+	out := make([]map[string]any, 0, m.count)
+	for i := range m.buckets {
+		if m.buckets[i].dib != -1 {
+			out = append(out, m.buckets[i].value)
+		}
+	}
+	return out
 }
 
 // rehash doubles the capacity and reinserts all occupied entries.

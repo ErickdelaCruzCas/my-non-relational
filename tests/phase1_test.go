@@ -191,7 +191,7 @@ func TestDeleteNotFound(t *testing.T) {
 func TestGetAfterDelete(t *testing.T) {
 	db := setupDB(t)
 	db.Insert(map[string]any{"_id": "d2"}) //nolint:errcheck
-	db.Delete("d2")                         //nolint:errcheck
+	db.Delete("d2")                        //nolint:errcheck
 
 	_, err := db.Get("d2")
 	if err == nil {
@@ -299,6 +299,74 @@ func TestHashMapTombstoneProbing(t *testing.T) {
 				t.Errorf("key %q should still be reachable after tombstone insertions", k)
 			}
 		}
+	}
+}
+
+// ─── Find tests ─────────────────────────────────────────────────────────────
+
+func TestFindNoFilter(t *testing.T) {
+	db := setupDB(t)
+	db.Insert(map[string]any{"_id": "a", "city": "mx"}) //nolint:errcheck
+	db.Insert(map[string]any{"_id": "b", "city": "us"}) //nolint:errcheck
+	db.Insert(map[string]any{"_id": "c", "city": "mx"}) //nolint:errcheck
+
+	docs, err := db.Find(nil)
+	if err != nil {
+		t.Fatalf("Find failed: %v", err)
+	}
+	if len(docs) != 3 {
+		t.Errorf("expected 3 docs, got %d", len(docs))
+	}
+}
+
+func TestFindWithFilter(t *testing.T) {
+	db := setupDB(t)
+	db.Insert(map[string]any{"_id": "a", "city": "mx"}) //nolint:errcheck
+	db.Insert(map[string]any{"_id": "b", "city": "us"}) //nolint:errcheck
+	db.Insert(map[string]any{"_id": "c", "city": "mx"}) //nolint:errcheck
+
+	docs, err := db.Find(map[string]string{"city": "mx"})
+	if err != nil {
+		t.Fatalf("Find failed: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Errorf("expected 2 docs with city=mx, got %d", len(docs))
+	}
+	for _, doc := range docs {
+		if doc["city"] != "mx" {
+			t.Errorf("found doc with city=%v, expected mx", doc["city"])
+		}
+	}
+}
+
+func TestFindExcludesDeleted(t *testing.T) {
+	db := setupDB(t)
+	db.Insert(map[string]any{"_id": "a", "city": "mx"}) //nolint:errcheck
+	db.Insert(map[string]any{"_id": "b", "city": "mx"}) //nolint:errcheck
+	db.Delete("b")                                      //nolint:errcheck
+
+	docs, err := db.Find(map[string]string{"city": "mx"})
+	if err != nil {
+		t.Fatalf("Find failed: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Errorf("expected 1 doc after delete, got %d", len(docs))
+	}
+	if docs[0]["_id"] != "a" {
+		t.Errorf("expected _id=a, got %v", docs[0]["_id"])
+	}
+}
+
+func TestFindDefensiveCopy(t *testing.T) {
+	db := setupDB(t)
+	db.Insert(map[string]any{"_id": "a", "v": "original"}) //nolint:errcheck
+
+	docs, _ := db.Find(nil)
+	docs[0]["v"] = "mutated"
+
+	docs2, _ := db.Find(nil)
+	if docs2[0]["v"] != "original" {
+		t.Errorf("Find must return defensive copies, got %v", docs2[0]["v"])
 	}
 }
 
