@@ -16,7 +16,7 @@ import (
 func main() {
 	const dbPath = "data/"
 	engine.LogInfo("[repl] start", "path", dbPath)
-	db, err := api.Open(dbPath)
+	db, err := api.Open(dbPath, engine.JSONSerializer{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening db: %v\n", err)
 		os.Exit(1)

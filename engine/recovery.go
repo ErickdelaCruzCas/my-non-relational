@@ -1,6 +1,17 @@
 // Package engine — WAL recovery
 //
-// # Fase 2 — Replay del WAL con validación CRC32
+// # Fase 7 — Replay del WAL v2: despacho por byte de versión
+//
+// ReplayWAL acepta un mapa de serializadores (map[byte]Serializer) en lugar
+// de uno solo. Cada registro declara su propio formato en el byte 12 del header
+// (FormatJSON=1, FormatMsgPack=2). Esto permite WALs mixtos: si una migración
+// se interrumpió, recovery puede leer registros JSON y MsgPack en el mismo archivo.
+//
+// Fallback: si el byte de versión no tiene entrada en el mapa, se usa
+// sers[FormatJSON] para compatibilidad con WALs v1 sin byte de versión
+// (que escriben 0x00 en esa posición).
+//
+// # Fase 2 — Replay del WAL con validación CRC32 (heredado)
 //
 // ReplayWAL lee data/data.log de inicio a fin y reconstruye el estado vivo
 // de la base de datos. El último registro por _id gana: un UPDATE sobreescribe
@@ -30,15 +41,16 @@ type RecoveryResult struct {
 
 // ReplayWAL reads the WAL at path and returns the live document set.
 //
-// ser is used to decode each record's payload. Pass engine.JSONSerializer{}
-// for Phases 1–6; Phase 7 will pass the appropriate serializer based on the
-// version byte in the record header.
+// sers maps each format byte (FormatJSON=1, FormatMsgPack=2) to its Serializer.
+// Each record's version byte (hdr[12]) selects the deserializer for that record,
+// enabling transparent recovery of mixed JSON+MsgPack WALs. If a version byte
+// is not in sers, falls back to sers[FormatJSON].
 //
 // If the file does not exist (first startup), it returns an empty map and
 // a zero RecoveryResult — not an error.
 //
 // The returned map is keyed by _id. Callers load it into the HashMap.
-func ReplayWAL(path string, ser Serializer) (map[string]map[string]any, RecoveryResult, error) {
+func ReplayWAL(path string, sers map[byte]Serializer) (map[string]map[string]any, RecoveryResult, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return make(map[string]map[string]any), RecoveryResult{}, nil
@@ -53,7 +65,8 @@ func ReplayWAL(path string, ser Serializer) (map[string]map[string]any, Recovery
 	var pos int64 // byte position of the current record's start
 
 	for {
-		// ── Read 12-byte header ──────────────────────────────────────────
+		// ── Read 13-byte header (WAL v2) ─────────────────────────────────
+		// Layout: size(4) + type(4) + crc32(4) + version(1)
 		recordOffset := pos
 		var hdr [headerSize]byte
 		_, err := io.ReadFull(f, hdr[:])
@@ -73,6 +86,7 @@ func ReplayWAL(path string, ser Serializer) (map[string]map[string]any, Recovery
 		size := binary.LittleEndian.Uint32(hdr[0:4])
 		recType := binary.LittleEndian.Uint32(hdr[4:8])
 		storedCRC := binary.LittleEndian.Uint32(hdr[8:12])
+		version := hdr[12] // FormatJSON=1, FormatMsgPack=2; 0x00 for v1 WALs
 
 		// ── Read payload ─────────────────────────────────────────────────
 		payload := make([]byte, size)
@@ -94,6 +108,14 @@ func ReplayWAL(path string, ser Serializer) (map[string]map[string]any, Recovery
 			LogInfo("[recovery] crc_mismatch, skipping record",
 				"entry", result.EntriesReplayed)
 			continue
+		}
+
+		// ── Select serializer by version byte ────────────────────────────
+		ser, ok := sers[version]
+		if !ok {
+			// Graceful fallback: v1 WALs have version=0x00; unknown versions
+			// default to JSON for forward compatibility.
+			ser = sers[FormatJSON]
 		}
 
 		// ── Deserialize payload ──────────────────────────────────────────

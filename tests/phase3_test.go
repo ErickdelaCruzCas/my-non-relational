@@ -11,10 +11,10 @@ import (
 	"my-non-relational/engine"
 )
 
-// openDiskDB opens a disk-backed DB in dir and registers cleanup.
+// openDiskDB opens a disk-backed DB in dir using JSON serialization and registers cleanup.
 func openDiskDB(t *testing.T, dir string) *api.DB {
 	t.Helper()
-	db, err := api.Open(dir)
+	db, err := api.Open(dir, engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Open(%q): %v", dir, err)
 	}

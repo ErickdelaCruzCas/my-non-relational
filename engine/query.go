@@ -52,7 +52,7 @@ type FindRequest struct {
 // entries is the full sorted primary index. secondary is used for single-eq
 // optimization. rangeIdx is used for single range-op optimization (Phase 5a).
 // file is the WAL *os.File. ser is the active serializer.
-func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *RangeAVLIndex, file *os.File, ser Serializer, req FindRequest) ([]map[string]any, error) {
+func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *RangeAVLIndex, file *os.File, sers map[byte]Serializer, req FindRequest) ([]map[string]any, error) {
 	// ── 1. Strategy: pick candidate offsets ──────────────────────────────────
 	var candidates []map[string]any
 	strategy := "full_scan"
@@ -64,7 +64,7 @@ func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *Rang
 			strategy = "secondary"
 			LogInfo("[query] strategy", "type", strategy, "field", f.Field, "value", f.Value, "candidates", len(offsets))
 			for _, off := range offsets {
-				doc, err := ReadDocAt(file, off, ser)
+				doc, err := ReadDocAt(file, off, sers)
 				if err != nil {
 					LogInfo("[query] read_error", "offset", off, "err", err)
 					continue
@@ -76,7 +76,7 @@ func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *Rang
 			strategy = "range_bst"
 			LogInfo("[query] strategy", "type", strategy, "field", f.Field, "op", f.Op, "value", f.Value, "candidates", len(offsets))
 			for _, off := range offsets {
-				doc, err := ReadDocAt(file, off, ser)
+				doc, err := ReadDocAt(file, off, sers)
 				if err != nil {
 					LogInfo("[query] read_error", "offset", off, "err", err)
 					continue
@@ -86,7 +86,7 @@ func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *Rang
 		} else {
 			LogInfo("[query] strategy", "type", strategy, "total_docs", len(entries))
 			for _, e := range entries {
-				doc, err := ReadDocAt(file, e.Offset, ser)
+				doc, err := ReadDocAt(file, e.Offset, sers)
 				if err != nil {
 					LogInfo("[query] read_error", "id", e.ID, "err", err)
 					continue
@@ -97,7 +97,7 @@ func ExecuteFind(entries []IndexEntry, secondary *SecondaryIndex, rangeIdx *Rang
 	} else {
 		LogInfo("[query] strategy", "type", strategy, "total_docs", len(entries))
 		for _, e := range entries {
-			doc, err := ReadDocAt(file, e.Offset, ser)
+			doc, err := ReadDocAt(file, e.Offset, sers)
 			if err != nil {
 				LogInfo("[query] read_error", "id", e.ID, "err", err)
 				continue

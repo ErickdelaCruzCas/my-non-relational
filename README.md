@@ -59,7 +59,7 @@ En Fase 7 el formato cambia a MsgPack con un byte de versión en el header.
 | Sorted slice + binary search (primario) | Lookups O(log N), soporte de rangos sobre IDs | Más lento que hash map O(1) amortizado |
 | Hash map (secundario) | Lookups O(1) por valor exacto | No soporta rangos; colisiones bajo carga extrema |
 | Min-heap para TopK | Sort parcial O(M log K) vs O(M log M) | Código más complejo que sort.Slice |
-| BST naïve → AVL → Skip List | Contraste educativo completo (3 estructuras, 2 trade-offs) | AVL requiere rotaciones; Skip List usa más memoria que AVL |
+| BST naïve → AVL | Contraste educativo completo (2 estructuras, 1 trade-off); AVL es la solución final activa | El Skip List fue estudiado conceptualmente pero no implementado — se prefirió la predictibilidad determinista del AVL sobre la aleatoriedad probabilística |
 | Single-writer RWMutex | Modelo simple sin conflictos | Throughput de escritura serializado |
 | JSON (fases 1-6) | Legible, debuggeable, sin dependencias | Más lento y voluminoso que binary formats |
 | MsgPack (fase 7+) | ~3x más rápido, ~40% menos espacio | Ilegible sin decoder; dependencia externa |
@@ -350,7 +350,7 @@ El índice primario es un slice de structs `{id string, offset int64}` mantenido
 1. Permite binary search como ejercicio explícito.
 2. Soporta rangos sobre IDs (ej: todos los IDs entre "a" y "b").
 3. Contrasta con el hash map del índice secundario — dos estructuras, dos trade-offs.
-4. Prepara la intuición para el Skip List de Fase 5.
+4. Prepara la intuición para estructuras de rangos (BST y AVL de Fase 5).
 
 **Inserción ordenada**: `O(N)` en el peor caso (insertar al principio). Para un proyecto educativo con datasets de decenas de miles de docs, es aceptable. Se documenta la limitación.
 
@@ -481,7 +481,7 @@ Filter {
 
 ---
 
-## Fase 5 — BST → AVL → Skip List (índice de rangos)
+## Fase 5 — BST → AVL (índice de rangos)
 
 Esta fase tiene tres sub-pasos deliberados. Cada uno reemplaza al anterior como índice activo; los anteriores se mantienen como referencia educativa.
 
@@ -514,13 +514,17 @@ RL: nodo right-heavy con hijo left-heavy        → rotateRight(hijo) + rotateLe
 
 **Test de balance**: insertar 10,000 valores en orden ascendente. Altura del AVL debe ser ≤ 20 (vs. 9,999 del BST). La misma API que el BST: `Insert`, `Delete`, `Range`, `GreaterThan`, `LessThan`.
 
-**Por qué el AVL antes del Skip List**: sin el AVL, el estudiante no entiende *por qué* el Skip List es mejor. Con el AVL como referencia, el trade-off es concreto: "misma garantía O(log N) que AVL, pero sin el dolor de las rotaciones."
+**Por qué el AVL después del BST**: sin el BST degenrado, el estudiante no aprecia las rotaciones del AVL. El contraste es concreto: mismo dataset ordenado, BST altura ≈ N, AVL altura ≤ 15.
 
-**Desventaja del AVL**: las rotaciones son correctas pero complicadas. Cualquier bug en las 4 rotaciones es difícil de depurar. El Skip List resuelve esto con aleatoriedad.
+**Desventaja del AVL**: las rotaciones son correctas pero mecánicas. Cualquier bug en las 4 rotaciones es difícil de depurar. El trade-off se acepta: la garantía determinista es la compensación.
 
-### Fase 5b — Skip List (reemplaza BST y AVL)
+### Fase 5b — Skip List (diseño estudiado, no implementado)
 
-El Skip List es una lista enlazada multinivel con búsqueda probabilística O(log N) promedio. No requiere rotaciones. Parámetros: `p=0.5`, `maxLevel=16` (soporta hasta ~65,000 elementos con eficiencia).
+> **Decisión**: el Skip List fue analizado en detalle y se entendió su funcionamiento completo, pero se optó por **no implementarlo**. El AVL Tree de la Fase 5a.5 es la solución final activa para el índice de rangos.
+>
+> **Razón**: se prefirió la predictibilidad determinista del AVL — altura garantizada ≤ 1.44·log₂(N) siempre — sobre la naturaleza probabilística del Skip List. El árbol clásico tiene invariantes verificables en cada nodo; la corrección del Skip List depende de la calidad del PRNG y del análisis probabilístico. Para este proyecto educativo, la solución más formal es la más valiosa.
+
+El Skip List es una lista enlazada multinivel con búsqueda probabilística O(log N) promedio. No requiere rotaciones. Parámetros: `p=0.5`, `maxLevel=16`.
 
 ```
 Nivel 3: [-∞] ─────────────────────→ [40] → [+∞]
@@ -529,22 +533,23 @@ Nivel 1: [-∞] → [10] → [25] → [30] → [40] → [+∞]
 Nivel 0: [-∞] → [10] → [15] → [25] → [30] → [35] → [40] → [+∞]
 ```
 
-Cada nodo: `{key float64, offsets []int64, next [maxLevel]*Node}`.
-
-**Por qué Skip List > AVL para este caso**:
-- Sin rotaciones → implementación más simple.
-- O(log N) promedio garantizado probabilísticamente, sin casos degenerados.
-- Recorrido en orden es trivial (nivel 0 es una lista enlazada ordenada).
+**Por qué el Skip List es interesante** (aunque no implementado aquí):
+- Sin rotaciones → código más corto que AVL.
+- O(log N) promedio sin casos degenerados.
+- Recorrido en orden trivial (nivel 0 es lista enlazada ordenada).
 - Usado en producción: Redis sorted sets, RocksDB memtable.
 
-**Desventaja**: peor localidad de caché que B-Tree (nodos dispersos en heap). Documentada en código.
+**Por qué se eligió el AVL en su lugar**:
+- Altura determinista: siempre ≤ 1.44·log₂(N), sin depender de aleatoriedad.
+- Invariante verificable nodo a nodo: más fácil de razonar formalmente.
+- Las rotaciones son mecánicas y testables con un test de altura.
 
-### El arco completo
+### El arco de esta fase
 
 ```
-BST naïve  → O(N) worst case con datos ordenados. 18 líneas. Un bug y está hecho.
-AVL Tree   → O(log N) garantizado. Requiere 4 rotaciones. ~200 líneas.
-Skip List  → O(log N) probabilístico. Sin rotaciones. ~100 líneas. Más simple que AVL.
+BST naïve  → O(N) worst case con datos ordenados. Educativo: muestra el problema.
+AVL Tree   → O(log N) garantizado. 4 rotaciones. Solución final activa.
+Skip List  → O(log N) probabilístico. Sin rotaciones. Estudiado, no implementado.
 ```
 
 ### Nuevos filtros en Find
@@ -558,27 +563,25 @@ Find con "between": {Field: "score", Op: "between", Value: 25.0, ValueEnd: 75.0}
 ### Estrategia de query engine
 
 ```
-Filtro con campo en RangeFields → RANGE_SCAN (Skip List)
+Filtro con campo en RangeFields → RANGE_SCAN (AVL Tree)
 Filtro con campo en IndexedFields → INDEX_SCAN (hash map secundario)
 Ninguno de los anteriores → FULL_SCAN
 ```
 
 ### Archivos
 - `engine/bst.go` — BST naïve (Fase 5a; se mantiene como referencia educativa)
-- `engine/avl.go` — AVL Tree (Fase 5a.5; ya implementado)
-- `engine/skiplist.go` — Skip List (Fase 5b; reemplaza BST + AVL como índice activo)
-- `engine/index.go` — RangeIndex sobre Skip List
-- `engine/query.go` — nuevos operadores de filtro
-- `tests/phase5_test.go`
+- `engine/avl.go` — AVL Tree (Fase 5a.5; índice activo final)
+- `engine/range_avl.go` — RangeAVLIndex wrapper (una AVL por campo numérico)
+- `engine/query.go` — nuevos operadores de filtro (gt/gte/lt/lte/between)
+- `tests/phase5a_test.go`, `tests/phase5a5_test.go`
 
 ### Definition of Done
 - BST: test de desbalanceo con datos ordenados (medir profundidad)
-- AVL: insertar 10K valores ordenados, verificar altura ≤ 20
-- Skip List: Insert, Delete, Range, GreaterThan, LessThan correctos
-- Skip List no se degrada con datos ordenados (test comparativo vs. BST y AVL)
-- Find con `between`, `gt`, `lt` usa RANGE_SCAN
-- Stale offsets filtrados (verificar con índice primario)
-- Skip List reconstruido en recovery (replay del WAL)
+- AVL: insertar valores en orden ascendente, verificar altura ≤ 15 (TestAVLBalanceVsBST)
+- BST: misma carga, verificar degeneración altura ≈ N (contraste educativo)
+- Find con `between`, `gt`, `lt`, `gte`, `lte` usa strategy=range_bst con AVL
+- Índice actualizado correctamente tras Update y Delete
+- AVL reconstruido en recovery (replay del WAL)
 - `go test -race ./...` sin data races
 
 ---
@@ -803,7 +806,7 @@ Reclamar espacio en disco eliminando entradas muertas (updates y deletes anterio
 2. Replay completo del WAL actual → construir estado vivo.
 3. Escribir `data/data.log.compact` con solo los documentos vivos (un INSERT por doc).
 4. `os.Rename("data/data.log.compact", "data/data.log")` — atómico en POSIX.
-5. Reconstruir todos los índices (primary sorted slice, secondary hash maps, range skip lists) desde el nuevo WAL.
+5. Reconstruir todos los índices (primary sorted slice, secondary hash maps, range AVL trees) desde el nuevo WAL.
 6. Reabrir el WAL para nuevas escrituras.
 7. Liberar lock.
 
@@ -848,7 +851,7 @@ CompactionResult {
 
 ```
 WAL (append-only)           → Fase 2  ✓
-MemTable (Skip List en RAM) → Fase 5b ✓
+MemTable (AVL Tree en RAM)  → Fase 5a.5 ✓
 Compaction                  → Fase 9  ✓
 Bloom Filters por nivel     → Fase 3  ✓
 SSTables                    → Fase 9b ← esta fase
@@ -967,8 +970,8 @@ Config.LeaderAddr    string    // solo en follower
 | Min-Heap (TopK sort) | 4 | `engine/heap.go` |
 | Projection de campos | 4 | `engine/query.go` |
 | BST naïve (índice de rangos) | 5a | `engine/bst.go` |
-| AVL Tree (O(log N) garantizado) | 5a.5 | `engine/avl.go` |
-| Skip List (índice de rangos) | 5b | `engine/skiplist.go` |
+| AVL Tree (O(log N) garantizado) — **solución final activa** | 5a.5 | `engine/avl.go`, `engine/range_avl.go` |
+| Skip List (estudiado, no implementado — se prefirió AVL) | 5b | — |
 | `sync.RWMutex` single-writer | 6 | `api/db.go` |
 | Contadores atómicos | 6, 8 | `engine/stats.go` |
 | Histogramas con buckets fijos | 8 | `engine/stats.go` |

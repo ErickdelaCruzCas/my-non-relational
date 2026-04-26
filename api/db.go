@@ -1,12 +1,14 @@
 // Package api exposes the public database interface.
 //
-// # Concurrency guarantees (Phase 3)
+// # Concurrency guarantees (Phase 6)
 //
 //   - Write ops (Insert, Update, Delete): db.mu.Lock() — single writer.
 //   - Read ops (Get, Find): db.mu.RLock() — multiple concurrent readers.
 //   - WAL ReadAt: no lock needed — pread(2) is concurrency-safe.
+//   - Stats(): no lock — uses atomic.Load only.
 //   - Linearizability per operation: each call is atomic from the caller's view.
 //   - No snapshot isolation: a Get may observe a concurrent Insert.
+//   - No write starvation: sync.RWMutex prevents writers from waiting indefinitely.
 //
 // # Storage model (Phase 3)
 //
@@ -41,10 +43,18 @@ type DB struct {
 	wal       *engine.WAL            // nil in in-memory mode
 	ser       engine.Serializer      // swapped to MsgPackSerializer in Phase 7
 	counter   atomic.Int64           // monotonic ID counter; must not be copied
+	stats     *engine.DBStats        // atomic operation counters (Phase 6)
 	path      string                 // "" = in-memory, else = data directory
 }
 
 // Open initializes the database.
+//
+// ser selects the serialization format for new writes:
+//   - engine.JSONSerializer{} — human-readable, default for Phases 1–6.
+//   - engine.MsgPackSerializer{} — ~3× faster, ~40% smaller (Phase 7+).
+//
+// Recovery always handles both formats via the per-record version byte (WAL v2),
+// so switching serializers on restart is safe even if the WAL contains old records.
 //
 // In-memory mode (path == ""): no WAL, no disk I/O. Used by Phase 1 tests.
 //
@@ -52,12 +62,13 @@ type DB struct {
 //  1. Load index.json and spot-check against the WAL (fast path).
 //  2. On any failure, rebuild indexes by replaying the WAL (slow path).
 //  3. Open the WAL for new writes.
-func Open(path string) (*DB, error) {
+func Open(path string, ser engine.Serializer) (*DB, error) {
 	engine.LogInfo("[db] open", "path", path)
 
 	db := &DB{
-		ser:  engine.JSONSerializer{},
-		path: path,
+		ser:   ser,
+		path:  path,
+		stats: engine.NewDBStats(),
 	}
 
 	if path == "" {
@@ -111,8 +122,9 @@ func Open(path string) (*DB, error) {
 	}
 
 	// ── Open WAL for new writes ───────────────────────────────────────────────
+	format := walFormat(ser)
 	var err error
-	db.wal, err = engine.OpenWAL(walPath)
+	db.wal, err = engine.OpenWAL(walPath, format)
 	if err != nil {
 		return nil, fmt.Errorf("open wal: %w", err)
 	}
@@ -138,6 +150,7 @@ func (db *DB) Insert(doc map[string]any) (string, error) {
 		stored := copyDoc(doc)
 		stored["_id"] = id
 		db.store.Set(id, stored)
+		db.stats.IncWrites()
 		engine.LogInfo("[db] insert", "id", id, "mode", "memory")
 		return id, nil
 	}
@@ -163,6 +176,7 @@ func (db *DB) Insert(doc map[string]any) (string, error) {
 		engine.LogInfo("[db] save_index_error", "op", "insert", "err", err)
 	}
 
+	db.stats.IncWrites()
 	engine.LogInfo("[db] insert", "id", id, "offset", offset)
 	return id, nil
 }
@@ -180,6 +194,7 @@ func (db *DB) Get(id string) (map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("not found: %s", id)
 		}
+		db.stats.IncReads()
 		return copyDoc(doc), nil
 	}
 
@@ -190,10 +205,11 @@ func (db *DB) Get(id string) (map[string]any, error) {
 		return nil, fmt.Errorf("not found: %s", id)
 	}
 
-	doc, err := engine.ReadDocAt(db.wal.File(), offset, db.ser)
+	doc, err := engine.ReadDocAt(db.wal.File(), offset, allSerializers())
 	if err != nil {
 		return nil, fmt.Errorf("read doc: %w", err)
 	}
+	db.stats.IncReads()
 	return copyDoc(doc), nil
 }
 
@@ -217,6 +233,7 @@ func (db *DB) Update(id string, partial map[string]any) error {
 		}
 		merged := mergeDoc(existing, partial, id)
 		db.store.Set(id, merged)
+		db.stats.IncWrites()
 		engine.LogInfo("[db] update", "id", id, "mode", "memory")
 		return nil
 	}
@@ -227,7 +244,7 @@ func (db *DB) Update(id string, partial map[string]any) error {
 		return fmt.Errorf("not found: %s", id)
 	}
 
-	oldDoc, err := engine.ReadDocAt(db.wal.File(), oldOffset, db.ser)
+	oldDoc, err := engine.ReadDocAt(db.wal.File(), oldOffset, allSerializers())
 	if err != nil {
 		return fmt.Errorf("read existing doc: %w", err)
 	}
@@ -249,6 +266,7 @@ func (db *DB) Update(id string, partial map[string]any) error {
 		engine.LogInfo("[db] save_index_error", "op", "update", "err", err)
 	}
 
+	db.stats.IncWrites()
 	engine.LogInfo("[db] update", "id", id, "old_offset", oldOffset, "new_offset", newOffset)
 	return nil
 }
@@ -263,6 +281,7 @@ func (db *DB) Delete(id string) error {
 		if !db.store.Delete(id) {
 			return fmt.Errorf("not found: %s", id)
 		}
+		db.stats.IncDeletes()
 		engine.LogInfo("[db] delete", "id", id, "mode", "memory")
 		return nil
 	}
@@ -273,7 +292,7 @@ func (db *DB) Delete(id string) error {
 		return fmt.Errorf("not found: %s", id)
 	}
 
-	oldDoc, err := engine.ReadDocAt(db.wal.File(), offset, db.ser)
+	oldDoc, err := engine.ReadDocAt(db.wal.File(), offset, allSerializers())
 	if err != nil {
 		return fmt.Errorf("read doc for delete: %w", err)
 	}
@@ -290,6 +309,7 @@ func (db *DB) Delete(id string) error {
 		engine.LogInfo("[db] save_index_error", "op", "delete", "err", err)
 	}
 
+	db.stats.IncDeletes()
 	engine.LogInfo("[db] delete", "id", id, "offset", offset)
 	return nil
 }
@@ -314,11 +334,22 @@ func (db *DB) Find(req engine.FindRequest) ([]map[string]any, error) {
 			}
 		}
 		engine.LogInfo("[db] find", "mode", "memory", "matched", len(out))
+		db.stats.IncReads()
 		return out, nil
 	}
 
 	// ── Disk mode ─────────────────────────────────────────────────────────────
-	return engine.ExecuteFind(db.index.Entries(), db.secondary, db.rangeIdx, db.wal.File(), db.ser, req)
+	result, err := engine.ExecuteFind(db.index.Entries(), db.secondary, db.rangeIdx, db.wal.File(), allSerializers(), req)
+	if err == nil {
+		db.stats.IncReads()
+	}
+	return result, err
+}
+
+// Stats returns a snapshot of operation counters.
+// Does NOT acquire db.mu — uses atomic loads only (Phase 6).
+func (db *DB) Stats() engine.StatsSnapshot {
+	return db.stats.Snapshot()
 }
 
 // Close saves the index and closes the WAL.
@@ -421,7 +452,7 @@ func (db *DB) spotCheck(walPath string) error {
 	defer f.Close()
 
 	check := func(e engine.IndexEntry) error {
-		doc, err := engine.ReadDocAt(f, e.Offset, db.ser)
+		doc, err := engine.ReadDocAt(f, e.Offset, allSerializers())
 		if err != nil {
 			return fmt.Errorf("read at %d: %w", e.Offset, err)
 		}
@@ -444,7 +475,7 @@ func (db *DB) spotCheck(walPath string) error {
 
 // rebuildFromWAL replays the WAL and rebuilds both indexes from scratch.
 func (db *DB) rebuildFromWAL(walPath string) error {
-	docs, result, err := engine.ReplayWAL(walPath, db.ser)
+	docs, result, err := engine.ReplayWAL(walPath, allSerializers())
 	if err != nil {
 		return err
 	}
@@ -497,4 +528,22 @@ func copyDoc(doc map[string]any) map[string]any {
 		cp[k] = v
 	}
 	return cp
+}
+
+// walFormat derives the WAL version byte from the serializer type.
+func walFormat(ser engine.Serializer) byte {
+	if _, ok := ser.(engine.MsgPackSerializer); ok {
+		return engine.FormatMsgPack
+	}
+	return engine.FormatJSON
+}
+
+// allSerializers returns the full map used by recovery to dispatch per-record.
+// Both formats are always registered so mixed WALs can be replayed regardless
+// of which serializer the DB is currently configured with.
+func allSerializers() map[byte]engine.Serializer {
+	return map[byte]engine.Serializer{
+		engine.FormatJSON:    engine.JSONSerializer{},
+		engine.FormatMsgPack: engine.MsgPackSerializer{},
+	}
 }

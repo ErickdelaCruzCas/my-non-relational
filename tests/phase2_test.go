@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"my-non-relational/api"
+	"my-non-relational/engine"
 )
 
-// openDB creates a DB backed by a WAL in dir.
+// openDB creates a DB backed by a WAL in dir using JSON serialization.
 func openDB(t *testing.T, dir string) *api.DB {
 	t.Helper()
-	db, err := api.Open(dir)
+	db, err := api.Open(dir, engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Open(%q) failed: %v", dir, err)
 	}
@@ -48,7 +49,7 @@ func TestRestartPreservesData(t *testing.T) {
 	}
 
 	// ── Sesión 2: reabrir y verificar ────────────────────────────────────
-	db2, err := api.Open(dir)
+	db2, err := api.Open(dir, engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestCorruptedTailIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	// Añadir 6 bytes basura (mitad de un header de 12 bytes).
+	// Añadir 6 bytes basura (menos de la mitad de un header de 13 bytes).
 	f, err := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
@@ -117,7 +118,7 @@ func TestCorruptedTailIgnored(t *testing.T) {
 	}
 
 	// Reabrir: los dos primeros docs deben estar presentes, sin panic.
-	db2, err := api.Open(dir)
+	db2, err := api.Open(dir, engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Reopen after corrupt tail: %v", err)
 	}
@@ -146,12 +147,13 @@ func TestInvalidCRCDiscarded(t *testing.T) {
 	}
 
 	// Construir y añadir manualmente un registro con CRC incorrecto.
-	// Layout: [size uint32LE][type uint32LE][bad_crc uint32LE][payload]
+	// Layout WAL v2: [size uint32LE][type uint32LE][bad_crc uint32LE][version byte][payload]
 	payload := []byte(`{"_id":"bad","v":"corrupt"}`)
-	var hdr [12]byte
+	var hdr [13]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload)))
 	binary.LittleEndian.PutUint32(hdr[4:8], 1)           // RecordInsert
 	binary.LittleEndian.PutUint32(hdr[8:12], 0xDEADBEEF) // crc incorrecto
+	hdr[12] = 1                                          // FormatJSON
 
 	walPath := filepath.Join(dir, "data.log")
 	f, err := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -163,7 +165,7 @@ func TestInvalidCRCDiscarded(t *testing.T) {
 	f.Close()
 
 	// Reabrir: "good" debe estar; "bad" debe ser descartado por CRC inválido.
-	db2, err := api.Open(dir)
+	db2, err := api.Open(dir, engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}

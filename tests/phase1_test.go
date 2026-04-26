@@ -12,7 +12,7 @@ import (
 
 func setupDB(t *testing.T) *api.DB {
 	t.Helper()
-	db, err := api.Open("")
+	db, err := api.Open("", engine.JSONSerializer{})
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

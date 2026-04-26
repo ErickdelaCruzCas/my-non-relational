@@ -1,24 +1,28 @@
 // Package engine — WAL (Write-Ahead Log)
 //
-// # Fase 2 — Append-only log con CRC32
+// # Fase 7 — WAL v2: byte de versión por registro
 //
-// Cada operación de escritura (INSERT, UPDATE, DELETE) se serializa en
-// data/data.log como un registro autocontenido:
+// Cada registro incluye un byte de versión (byte 12 del header) que indica
+// el formato de serialización del payload:
 //
-//	┌──────────┬──────────┬──────────┬──────────────────────────┐
-//	│ 4 bytes  │ 4 bytes  │ 4 bytes  │ N bytes                  │
-//	│  size    │  type    │  crc32   │  JSON payload             │
-//	│ uint32LE │ uint32LE │ uint32LE │  {"_id":"...", ...}       │
-//	└──────────┴──────────┴──────────┴──────────────────────────┘
+//	┌──────────┬──────────┬──────────┬──────────┬──────────────────────────┐
+//	│ 4 bytes  │ 4 bytes  │ 4 bytes  │ 1 byte   │ N bytes                  │
+//	│  size    │  type    │  crc32   │ version  │  payload                 │
+//	│ uint32LE │ uint32LE │ uint32LE │ 1=JSON   │  JSON o MsgPack          │
+//	│          │          │          │ 2=msgpk  │                          │
+//	└──────────┴──────────┴──────────┴──────────┴──────────────────────────┘
 //
-// El CRC32 protege el payload contra corrupción silenciosa en disco.
-// Recovery rechaza registros con checksum inválido en lugar de insertar
-// datos corruptos silenciosamente.
+// CRC32 cubre únicamente el payload (sin el byte de versión).
+// `size` es len(payload) — no incluye el byte de versión.
 //
-// Trade-off: file.Sync() en cada escritura garantiza que el SO confirma
-// la escritura antes de retornar al cliente. Esto es ~100x más lento que
-// no hacerlo, pero es la garantía de durabilidad más sencilla posible.
-// Se medirá en Fase 8 (observabilidad).
+// El byte de versión permite WALs mixtos: si una migración se interrumpe,
+// recovery puede leer registros JSON y MsgPack en el mismo archivo porque
+// cada registro declara su propio formato.
+//
+// # Fase 2 — Append-only log con CRC32 (heredado)
+//
+// Trade-off: file.Sync() en cada escritura garantiza durabilidad.
+// ~100× más lento que sin Sync, pero es la garantía más sencilla posible.
 package engine
 
 import (
@@ -34,7 +38,13 @@ const (
 	RecordDelete uint32 = 3
 )
 
-const headerSize = 12 // 3 × uint32LE
+// Serialization format constants written as the version byte (byte 12).
+const (
+	FormatJSON    = byte(1)
+	FormatMsgPack = byte(2)
+)
+
+const headerSize = 13 // size(4) + type(4) + crc32(4) + version(1)
 
 // WAL is an append-only write-ahead log. A single WAL file holds all
 // mutations in the order they were applied. It is not safe for concurrent
@@ -42,12 +52,13 @@ const headerSize = 12 // 3 × uint32LE
 type WAL struct {
 	f      *os.File
 	offset int64 // byte position of the next write; maintained locally to avoid Seek calls
+	format byte  // FormatJSON or FormatMsgPack — written as version byte in every record
 }
 
 // OpenWAL opens (or creates) the WAL file at path.
-// If the file already exists its current size becomes the starting offset,
-// so subsequent Appends land after all existing records.
-func OpenWAL(path string) (*WAL, error) {
+// format is written as the version byte in every subsequent Append call.
+// If the file already exists its current size becomes the starting offset.
+func OpenWAL(path string, format byte) (*WAL, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
@@ -57,25 +68,24 @@ func OpenWAL(path string) (*WAL, error) {
 		f.Close()
 		return nil, err
 	}
-	return &WAL{f: f, offset: fi.Size()}, nil
+	return &WAL{f: f, offset: fi.Size(), format: format}, nil
 }
 
 // Append writes a single record to the WAL and syncs to disk.
-// Returns the byte offset at which the record starts — reserved for Fase 3
-// (index stores id → offset for O(1) disk reads).
+// Returns the byte offset at which the record starts.
 //
-// The record layout: [size uint32LE][type uint32LE][crc32 uint32LE][payload…]
-// CRC32 is computed over payload only (not the header).
+// Record layout: [size uint32LE][type uint32LE][crc32 uint32LE][version byte][payload…]
+// CRC32 is computed over payload only (not the header or version byte).
 func (w *WAL) Append(recType uint32, payload []byte) (int64, error) {
 	off := w.offset
 
 	crc := crc32.ChecksumIEEE(payload)
 
-	// Pack header into a fixed-size array: one Write, no heap alloc.
 	var hdr [headerSize]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload)))
 	binary.LittleEndian.PutUint32(hdr[4:8], recType)
 	binary.LittleEndian.PutUint32(hdr[8:12], crc)
+	hdr[12] = w.format
 
 	if _, err := w.f.Write(hdr[:]); err != nil {
 		return 0, err
@@ -84,7 +94,6 @@ func (w *WAL) Append(recType uint32, payload []byte) (int64, error) {
 		return 0, err
 	}
 
-	// Sync before returning so the caller knows the record is on stable storage.
 	if err := w.f.Sync(); err != nil {
 		return 0, err
 	}

@@ -82,7 +82,7 @@ func main() {
 	// ── Open DB and insert documents ──────────────────────────────────────────
 	engine.LogInfo("[seed] open", "dir", *dir, "mode", *mode, "count", *count)
 
-	db, err := api.Open(*dir)
+	db, err := api.Open(*dir, engine.JSONSerializer{})
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
