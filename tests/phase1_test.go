@@ -310,7 +310,7 @@ func TestFindNoFilter(t *testing.T) {
 	db.Insert(map[string]any{"_id": "b", "city": "us"}) //nolint:errcheck
 	db.Insert(map[string]any{"_id": "c", "city": "mx"}) //nolint:errcheck
 
-	docs, err := db.Find(nil)
+	docs, err := db.Find(engine.FindRequest{})
 	if err != nil {
 		t.Fatalf("Find failed: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestFindWithFilter(t *testing.T) {
 	db.Insert(map[string]any{"_id": "b", "city": "us"}) //nolint:errcheck
 	db.Insert(map[string]any{"_id": "c", "city": "mx"}) //nolint:errcheck
 
-	docs, err := db.Find(map[string]string{"city": "mx"})
+	docs, err := db.Find(engine.FindRequest{Filters: []engine.Filter{{Field: "city", Op: "eq", Value: "mx"}}})
 	if err != nil {
 		t.Fatalf("Find failed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestFindExcludesDeleted(t *testing.T) {
 	db.Insert(map[string]any{"_id": "b", "city": "mx"}) //nolint:errcheck
 	db.Delete("b")                                      //nolint:errcheck
 
-	docs, err := db.Find(map[string]string{"city": "mx"})
+	docs, err := db.Find(engine.FindRequest{Filters: []engine.Filter{{Field: "city", Op: "eq", Value: "mx"}}})
 	if err != nil {
 		t.Fatalf("Find failed: %v", err)
 	}
@@ -361,10 +361,10 @@ func TestFindDefensiveCopy(t *testing.T) {
 	db := setupDB(t)
 	db.Insert(map[string]any{"_id": "a", "v": "original"}) //nolint:errcheck
 
-	docs, _ := db.Find(nil)
+	docs, _ := db.Find(engine.FindRequest{})
 	docs[0]["v"] = "mutated"
 
-	docs2, _ := db.Find(nil)
+	docs2, _ := db.Find(engine.FindRequest{})
 	if docs2[0]["v"] != "original" {
 		t.Errorf("Find must return defensive copies, got %v", docs2[0]["v"])
 	}

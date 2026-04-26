@@ -75,8 +75,10 @@ func Help() {
 		{"insert <json>", "Inserta un documento.", `e.g. insert {"name":"alice"}`},
 		{"get <id>", "Obtiene un documento.", ""},
 		{"update <id> <json>", "Fusiona campos en un documento existente.", ""},
-		{"find", "Lista todos los IDs.", ""},
-		{"find <campo>=<valor>", "Lista IDs donde campo coincide con valor.", ""},
+		{"find", "Lista todos los documentos.", ""},
+		{"find <campo>=<valor>", "Filtra por campo igual a valor.", ""},
+		{"find ... sort <campo> [asc|desc]", "Ordena resultados.", ""},
+		{"find ... limit <N>", "Limita a N resultados.", ""},
 		{"delete <id>", "Elimina un documento.", ""},
 		{"help", "Muestra este mensaje.", ""},
 		{"exit", "Salir.", ""},
@@ -101,6 +103,23 @@ func IDList(docs []map[string]any) {
 		if id, ok := doc["_id"].(string); ok {
 			fmt.Println(color(cyan, id))
 		}
+	}
+	noun := "documentos"
+	if len(docs) == 1 {
+		noun = "documento"
+	}
+	fmt.Printf("(%d %s)\n", len(docs), noun)
+}
+
+// DocList prints a list of full documents as indented JSON, followed by a
+// count line. If docs is empty it prints a "no results" message instead.
+func DocList(docs []map[string]any) {
+	if len(docs) == 0 {
+		fmt.Println(color(cyan, "(no results)"))
+		return
+	}
+	for _, doc := range docs {
+		Doc(doc)
 	}
 	noun := "documentos"
 	if len(docs) == 1 {

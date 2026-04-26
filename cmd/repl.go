@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"my-non-relational/api"
@@ -121,24 +122,67 @@ func cmdUpdate(db *api.DB, rest string) {
 	views.Success("updated  " + id)
 }
 
+// cmdFind parses the Phase 4 find grammar and executes the query.
+//
+//	find
+//	find <campo>=<valor>
+//	find <campo>=<valor> sort <campo>
+//	find <campo>=<valor> sort <campo> asc|desc
+//	find <campo>=<valor> sort <campo> limit <N>
+//	find <campo>=<valor> sort <campo> asc|desc limit <N>
 func cmdFind(db *api.DB, rest string) {
-	filter := map[string]string{}
-	if rest != "" {
-		// Parse "campo=valor". Only the first "=" is the separator so values
-		// containing "=" are handled correctly.
-		idx := strings.IndexByte(rest, '=')
-		if idx <= 0 {
-			views.Error(fmt.Errorf("usage: find  or  find <campo>=<valor>"))
-			return
+	req := engine.FindRequest{SortAsc: true} // default: ascending when sort is set
+
+	tokens := strings.Fields(rest)
+	i := 0
+	for i < len(tokens) {
+		tok := tokens[i]
+		switch strings.ToLower(tok) {
+		case "sort":
+			i++
+			if i >= len(tokens) {
+				views.Error(fmt.Errorf("sort requires a field name"))
+				return
+			}
+			req.SortBy = tokens[i]
+		case "asc":
+			req.SortAsc = true
+		case "desc":
+			req.SortAsc = false
+		case "limit":
+			i++
+			if i >= len(tokens) {
+				views.Error(fmt.Errorf("limit requires a number"))
+				return
+			}
+			n, err := strconv.Atoi(tokens[i])
+			if err != nil || n <= 0 {
+				views.Error(fmt.Errorf("limit must be a positive integer, got %q", tokens[i]))
+				return
+			}
+			req.Limit = n
+		default:
+			// Expect field=value. Only the first "=" is the separator.
+			idx := strings.IndexByte(tok, '=')
+			if idx <= 0 {
+				views.Error(fmt.Errorf("usage: find [<campo>=<valor>] [sort <campo>] [asc|desc] [limit <N>]"))
+				return
+			}
+			req.Filters = append(req.Filters, engine.Filter{
+				Field: tok[:idx],
+				Op:    "eq",
+				Value: tok[idx+1:],
+			})
 		}
-		filter[rest[:idx]] = rest[idx+1:]
+		i++
 	}
-	docs, err := db.Find(filter)
+
+	docs, err := db.Find(req)
 	if err != nil {
 		views.Error(err)
 		return
 	}
-	views.IDList(docs)
+	views.DocList(docs)
 }
 
 func cmdDelete(db *api.DB, id string) {

@@ -81,7 +81,7 @@ func TestPrimaryIndexOrder(t *testing.T) {
 		}
 	}
 
-	docs, _ := db.Find(nil)
+	docs, _ := db.Find(engine.FindRequest{})
 	got := make([]string, len(docs))
 	for i, d := range docs {
 		got[i] = d["_id"].(string)
@@ -194,7 +194,7 @@ func TestUpdatePreservesSecondaryIndex(t *testing.T) {
 	}
 
 	// Find by old city — must return nothing.
-	docs, _ := db.Find(map[string]string{"city": "mx"})
+	docs, _ := db.Find(engine.FindRequest{Filters: []engine.Filter{{Field: "city", Op: "eq", Value: "mx"}}})
 	for _, doc := range docs {
 		if doc["_id"] == id {
 			t.Error("old city=mx still appears in Find after Update")
@@ -202,7 +202,7 @@ func TestUpdatePreservesSecondaryIndex(t *testing.T) {
 	}
 
 	// Find by new city — must return the doc.
-	docs2, _ := db.Find(map[string]string{"city": "us"})
+	docs2, _ := db.Find(engine.FindRequest{Filters: []engine.Filter{{Field: "city", Op: "eq", Value: "us"}}})
 	found := false
 	for _, doc := range docs2 {
 		if doc["_id"] == id {

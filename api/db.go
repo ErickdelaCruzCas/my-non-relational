@@ -287,26 +287,22 @@ func (db *DB) Delete(id string) error {
 	return nil
 }
 
-// Find returns documents matching filter. Empty filter returns all documents.
-// In disk mode: iterates the primary index and reads each doc from disk.
-// O(N) disk reads — Phase 4's query engine will use the secondary index.
-func (db *DB) Find(filter map[string]string) ([]map[string]any, error) {
+// Find executes a query against the database.
+//
+// In-memory mode: filters inline (no heap, no secondary index).
+// Disk mode: delegates to engine.ExecuteFind which selects the strategy
+// (secondary index for single eq-filter, full scan otherwise) and applies
+// sort/limit via Min-Heap when both are present.
+func (db *DB) Find(req engine.FindRequest) ([]map[string]any, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	// ── In-memory mode ────────────────────────────────────────────────────────
 	if db.store != nil {
 		all := db.store.All()
-		if len(filter) == 0 {
-			out := make([]map[string]any, len(all))
-			for i, doc := range all {
-				out[i] = copyDoc(doc)
-			}
-			return out, nil
-		}
 		var out []map[string]any
 		for _, doc := range all {
-			if matchesFilter(doc, filter) {
+			if engine.MatchesAllFilters(doc, req.Filters) {
 				out = append(out, copyDoc(doc))
 			}
 		}
@@ -315,21 +311,7 @@ func (db *DB) Find(filter map[string]string) ([]map[string]any, error) {
 	}
 
 	// ── Disk mode ─────────────────────────────────────────────────────────────
-	entries := db.index.Entries()
-	engine.LogInfo("[db] find", "strategy", "full_scan", "total_docs", len(entries), "filter", filter)
-	var out []map[string]any
-	for _, e := range entries {
-		doc, err := engine.ReadDocAt(db.wal.File(), e.Offset, db.ser)
-		if err != nil {
-			engine.LogInfo("[db] find_read_error", "id", e.ID, "err", err)
-			continue
-		}
-		if len(filter) == 0 || matchesFilter(doc, filter) {
-			out = append(out, copyDoc(doc))
-		}
-	}
-	engine.LogInfo("[db] find", "strategy", "full_scan", "scanned", len(entries), "matched", len(out))
-	return out, nil
+	return engine.ExecuteFind(db.index.Entries(), db.secondary, db.wal.File(), db.ser, req)
 }
 
 // Close saves the index and closes the WAL.
@@ -460,20 +442,6 @@ func mergeDoc(existing, partial map[string]any, id string) map[string]any {
 	}
 	merged["_id"] = id
 	return merged
-}
-
-// matchesFilter reports whether doc satisfies all field=value pairs in filter.
-func matchesFilter(doc map[string]any, filter map[string]string) bool {
-	for field, want := range filter {
-		got, ok := doc[field]
-		if !ok {
-			return false
-		}
-		if fmt.Sprintf("%v", got) != want {
-			return false
-		}
-	}
-	return true
 }
 
 // extractID returns doc["_id"] if it is a non-empty string, otherwise "".
